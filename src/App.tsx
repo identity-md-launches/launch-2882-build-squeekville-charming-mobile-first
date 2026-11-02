@@ -2,6 +2,10 @@ import { useRef, useState } from "react";
 import { useConnection, useSwitchChain } from "wagmi";
 import { getAddress } from "viem";
 import { CHAIN_ID, CORE_ADDRESS } from "./chain/config";
+import {
+  FAILURE_LABELS,
+  type ConnectionDiagnostics,
+} from "./chain/diagnostics";
 import { useTown } from "./game/useTown";
 import { LOCATIONS, type Location } from "./game/types";
 import { Icon, HamsterMark } from "./components/Icons";
@@ -48,6 +52,38 @@ function EnergyMeter({
         ))}
       </div>
     </div>
+  );
+}
+function DiagnosticsPanel({ report }: { report: ConnectionDiagnostics }) {
+  const rows: [string, string][] = [
+    ["Failed stage", report.stage],
+    ["Failure type", FAILURE_LABELS[report.kind]],
+    ["RPC hostname", report.rpcHost],
+    ["Error name", report.errorName],
+    ["Short message", report.shortMessage],
+    ["Underlying cause", report.cause ?? "None reported"],
+  ];
+  if (report.rpcCode !== null)
+    rows.push(["RPC error code", String(report.rpcCode)]);
+  if (report.httpStatus !== null)
+    rows.push(["HTTP status", String(report.httpStatus)]);
+  return (
+    <details className="diagnostics">
+      <summary>
+        <span>Connection diagnostics</span>
+        <span className="disclosure-chevron" aria-hidden="true">
+          ⌄
+        </span>
+      </summary>
+      <dl>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
   );
 }
 export default function App() {
@@ -251,7 +287,7 @@ export default function App() {
               ) : (
                 <>
                   {town.canRun && !practice && (
-                    <p className="sign-disclosure">
+                    <p className="sign-disclosure" id="local-order-disclosure">
                       Sign a local mayor order. This does not send a
                       transaction, transfer assets or grant approvals. Your
                       order and town progress are saved in this browser.
@@ -267,7 +303,9 @@ export default function App() {
                     onClick={() => void town.placeOrder()}
                     disabled={signDisabled}
                     aria-describedby={
-                      !practice && town.canRun ? "local-order-note" : undefined
+                      !practice && town.canRun
+                        ? "local-order-disclosure local-order-note"
+                        : undefined
                     }
                   >
                     {town.busy ? (
@@ -293,7 +331,9 @@ export default function App() {
                       ? "Connect a wallet above, or explore in Practice."
                       : wrongNetwork
                         ? "Your town is saved. Switch to Sepolia to continue."
-                        : !practice && town.chainStatus === "loading"
+                        : !practice &&
+                            (town.chainStatus === "loading" ||
+                              town.chainStatus === "idle")
                           ? "Verifying the Squeekchain deployment…"
                           : !practice && town.chainStatus === "error"
                             ? "Connected mode unavailable. Your progress is saved."
@@ -347,7 +387,8 @@ export default function App() {
                     ? "Wrong network. Sepolia is required."
                     : !isConnected
                       ? "Real hamster work. Verified on Sepolia."
-                      : town.chainStatus === "loading"
+                      : town.chainStatus === "loading" ||
+                          town.chainStatus === "idle"
                         ? "Connecting to Squeekchain…"
                         : town.chainStatus === "error"
                           ? "Chain connection paused"
@@ -379,6 +420,9 @@ export default function App() {
                 >
                   {town.refreshing ? "Retrying…" : "Retry connection"}
                 </button>
+                {town.diagnostics && (
+                  <DiagnosticsPanel report={town.diagnostics} />
+                )}
               </div>
             )}
           </section>
@@ -481,7 +525,8 @@ export default function App() {
               </p>
               <p>
                 On connection failure, energy accrual pauses and your progress
-                stays saved. Practice is always separate simulated data.
+                stays saved. Connection diagnostics then name the stage that
+                failed. Practice is always separate simulated data.
               </p>
               <dl className="chain-facts">
                 <div>

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useConnection, useSignTypedData } from "wagmi";
-import { walletConfig, CHAIN_ID } from "../chain/config";
+import { walletConfig, CHAIN_ID, RPC_HOST } from "../chain/config";
 import { fetchSnapshot } from "../chain/adapter";
+import {
+  describeFailure,
+  failureNote,
+  type ConnectionDiagnostics,
+} from "../chain/diagnostics";
 import { changeSave, readSave, subscribeSaves } from "./store";
 import {
   applySnapshot,
@@ -15,7 +20,7 @@ import { saveKey, type Location, type Mode, type TownSave } from "./types";
 import { userError } from "../components/WalletSheet";
 
 export function useTown() {
-  const { address, chainId, isConnected } = useConnection();
+  const { address, chainId, isConnected, status } = useConnection();
   const signTypedData = useSignTypedData();
   const [mode, setMode] = useState<Mode>("connected");
   const [save, setSave] = useState<TownSave | null>(null);
@@ -25,6 +30,9 @@ export function useTown() {
   >("idle");
   const [refreshing, setRefreshing] = useState(false);
   const [chainNote, setChainNote] = useState("");
+  const [diagnostics, setDiagnostics] = useState<ConnectionDiagnostics | null>(
+    null,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [event, setEvent] = useState<Location | null>(null);
@@ -87,9 +95,17 @@ export function useTown() {
     let failures = 0;
     setChainStatus("idle");
     setChainNote("");
+    setDiagnostics(null);
     setRefreshing(false);
     setMore(false);
-    if (!key || mode !== "connected" || !isConnected || chainId !== CHAIN_ID) {
+    // A restored wallet reports isConnected while still "reconnecting", and active() refuses
+    // that state. Wait for "connected" here or the first read is dropped with nothing to rerun it.
+    if (
+      !key ||
+      mode !== "connected" ||
+      status !== "connected" ||
+      chainId !== CHAIN_ID
+    ) {
       refreshRef.current = () => {};
       return;
     }
@@ -115,6 +131,7 @@ export function useTown() {
         if (stopped) return;
         setSave(next.save);
         setChainStatus("ready");
+        setDiagnostics(null);
         failures = 0;
         setMore(snapshot.more);
         setChainNote(
@@ -129,11 +146,15 @@ export function useTown() {
         if (stopped) return;
         failures++;
         setChainStatus("error");
+        const report = describeFailure(error, RPC_HOST);
+        setDiagnostics(report);
         setChainNote(
-          error instanceof Error &&
-            !/http|fetch|request|timeout|network/i.test(error.message)
-            ? error.message
-            : "Sepolia could not be reached. Connected mode is unavailable. Progress is saved; energy accrual is paused.",
+          failureNote(
+            report,
+            error instanceof Error
+              ? error.message
+              : "Town progress could not be read.",
+          ),
         );
         delay = Math.min(300_000, 30_000 * 2 ** Math.min(failures - 1, 4));
       } finally {
@@ -160,7 +181,7 @@ export function useTown() {
       window.removeEventListener("online", online);
       document.removeEventListener("visibilitychange", online);
     };
-  }, [key, mode, isConnected, chainId, active]);
+  }, [key, mode, status, chainId, active]);
   const canRun =
     mode === "practice" ||
     (chainStatus === "ready" && chainId === CHAIN_ID && isConnected);
@@ -291,6 +312,7 @@ export function useTown() {
     select,
     chainStatus,
     chainNote,
+    diagnostics,
     refreshing,
     more,
     error,

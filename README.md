@@ -30,15 +30,22 @@ Serve the included `dist/` directory with any static HTTP/IPFS host. Vite uses `
 - Official SqueekCore V3 proxy: **`0x74665dAecA35A2303e767E76a2FF1FB6F93e119f`**.
 - Sources read before implementation: [Developers / deployments](https://docs.squeekchain.com/developers/), [SqueekCore reference](https://docs.squeekchain.com/developers/core/), [deployment verification quickstart](https://docs.squeekchain.com/developers/quickstart/) and [reorg guidance](https://docs.squeekchain.com/developers/index-events/).
 - The complete [published ABI](https://docs.squeekchain.com/assets/abi/SqueekCore.json) and [deployment record](https://docs.squeekchain.com/assets/deployments/sepolia.json) are pinned in `src/chain/`. `core-abi.ts` contains exact read-only entries from that ABI.
-- Public browser RPC: `https://11155111.rpc.thirdweb.com`, published in [viem’s Sepolia chain definition](https://github.com/wevm/viem/blob/main/src/chains/definitions/sepolia.ts). Both live JSON-RPC reads and browser cross-origin access were checked. The REST API is not used.
+- Public browser RPC: `https://rpc.sepolia.ethpandaops.io`, used for reads and offered to a wallet that has to add Sepolia. From a browser at the deployed hostname it answered `eth_chainId`, finalized blocks, individual and batched requests, storage and contract calls at the finalized block, and storage and contract calls 100,000 blocks back. See [the validation record](VALIDATION.md). The REST API is not used.
+- There is one RPC and no backup, because the alternatives tested do not meet the same bar: thirdweb answers 429 without a CORS header, publicnode prunes history older than about 10,000 blocks, and drpc’s free plan does not serve Sepolia.
 
-`src/chain/adapter.ts` verifies chain ID, implementation/admin slots, implementation runtime hashes, versions, layout digests, governance owners, contract links and launch configuration. It reads `configuration()`, `state()` and `roundPage()` at one Ethereum block, reconciles the frontier’s ledger position, then rechecks the block hash. Unknown upgrades or inconsistent results stop accrual.
+`src/chain/adapter.ts` calls both contracts through their proxy addresses, with implementation ABIs. For SqueekCore and SqueekMining it verifies the ERC-1967 implementation and admin slots, `implementationCodeAddress()`, `proxyAdmin()`, the implementation runtime hash, version and layout digest, and that each ProxyAdmin is owned by the governance timelock. It then checks the contract links and launch configuration, and reads `configuration()`, `state()` and `roundPage()`. All of this uses one finalized block, whose hash is rechecked at the end. An unknown implementation stops the refresh before anything is called through it.
+
+The local deployment record and ABIs are byte-identical to the published ones as of 2026-11-02, so no upgrade happened and no metadata changed. To review a future upgrade, compare the new published record with `src/chain/sepolia-deployment.json`, update it and the ABIs together, and run the live suite below. Never accept an implementation just because the chain reports it.
+
+When a refresh fails, the town shows an expandable **Connection diagnostics** section with the failed stage (network, finalized block, Core proxy verification, Mining proxy verification, configuration/links, state or roundPage), failure type, RPC hostname, error name, short message, sanitized cause, and any RPC code or HTTP status. `src/chain/diagnostics.ts` separates an RPC or network failure from a deployment mismatch and from inconsistent chain data. It reduces URLs to hostnames and removes credentials, request bodies, signatures and any address outside the published record.
 
 The official quickstart leaves confirmation policy to the integrator. **Squeekville chooses Ethereum’s `finalized` block tag with no faster fallback.** Ethereum finality, Squeekchain round settlement and completion of a Squeek block are separate. Game energy comes only from certified settled rounds, never from elapsed wall time or block completion.
 
 `roundPage()` returns active checkpoints, not a `work` field for every round. The adapter derives active round work by subtracting successive official `cumulativeWork` values, starting from the page’s `start` position. Only omitted IDs within `certifiedThroughRound` count as certified zero-work rounds. Positive work adds 3 energy; zero adds 1; the cap is 12. The first successful initialization starts at 0 and checkpoints the latest frontier without historical credit. Recovery advances the saved cursor in order, at most four pages per refresh, each covering at most 128 IDs and 16 active records. The returned frontier is always the next cursor.
 
-Polling normally runs every 30 seconds while visible; recovery uses 5 seconds and failures back off to 5 minutes. Errors preserve progress, pause accrual and offer retry. There is no simulation fallback in connected mode.
+Polling normally runs every 30 seconds while visible; recovery uses 5 seconds and failures back off to 5 minutes. Each request gets one quick retry. Errors preserve progress, pause accrual and offer retry. There is no simulation fallback in connected mode and no fallback to another block tag. Contract-wallet signature checks are the one read outside the finalized snapshot; they do not affect rounds or energy.
+
+**Settlement is currently stalled upstream.** On 2026-11-02, `settledThroughRound` was 1973 at the finalized block and had not moved since 2026-10-26 16:20 UTC, about 1,000 rounds behind the clock, with the contract not paused. Connected mode initializes and verifies normally, but Town Energy cannot rise for a new player until Squeekchain settles more rounds. Squeekville never fills that gap with made-up rounds.
 
 ## Signing and browser saves
 
@@ -52,16 +59,22 @@ Town progress is saved in this browser and does not sync across devices. Town En
 
 ## Checks and limits
 
-Production build, TypeScript checking and **28 unit tests passed**. Chromium production-export tests cover all three real-signature paths using a controlled EIP-1193/RPC test harness, all Practice events, rejected connection/signature requests, Sepolia switching, account changes, reload, competing tabs, deduplication, outage/recovery, keyboard dialog behavior and responsive layouts. Test doubles are confined to `test/`; production has no hidden simulation control. `test/fixtures/sepolia-identity.json` contains public deployment reads recorded on 2026-11-02 for repeatable identity checks.
-
-Run the browser suite with an installed Playwright module and its Chromium runtime:
+Commands and results are in [the validation record](VALIDATION.md). Doubles are confined to `test/`; production has no hidden simulation control.
 
 ```sh
-node test/browser.mjs /path/to/playwright/index.mjs
+npm run typecheck
+npm test                                  # offline: replays public reads recorded in test/fixtures/
+
+# Real Sepolia and official docs. These need network access.
+npx vitest run --config test/live/vitest.config.ts --root .
+RECORD_FIXTURE=1 npx vitest run --config test/live/vitest.config.ts --root .   # also re-records the fixture
+
+# Production export in Chromium. Build first. Pass an installed Playwright module.
+node test/browser.mjs /path/to/playwright/index.mjs          # test wallet and test RPC
+node test/live-browser.mjs /path/to/playwright/index.mjs     # test wallet, real RPC and real rounds
+node test/rpc-origin-check.mjs /path/to/playwright/index.mjs # raw RPC requests from the deployed origin
 ```
 
-The pinned interface probe passed **16/16 checks**. See [DESIGN.md](DESIGN.md) and [the validation record](VALIDATION.md) for measured coverage and fixes. A live browser read also decoded settled round 1973 at finalized Ethereum block 12048695 on 2026-11-02; that is a recorded observation, not a promised current frontier.
-
-Physical wallet apps, actual Coinbase passkey signing, native Safari/WebKit, screen readers and native browser zoom were not tested. A public RPC can be unavailable; settlement can lag with no promised duration. A changed finalized anchor halts the town rather than attempting an automatic rollback of already played local moments. Browser storage is local game state, not a tamper-proof financial ledger. No transactions, approvals, transfers, minting, badges or protocol rewards are requested or promised. No sound is played.
+Physical wallet apps, actual Coinbase passkey signing, native Safari/WebKit, screen readers and native browser zoom were not tested. Browser storage is local game state, not a tamper-proof financial ledger. A changed finalized anchor halts the town rather than rolling back local moments it already played. No transactions, approvals, transfers, minting, badges or protocol rewards are requested or promised. No sound is played.
 
 `src/assets/share.svg` is the editable share artwork; `scripts/render-share.mjs` optionally regenerates the committed PNG using Playwright. Font and wallet-mark licenses are included; see [THIRD_PARTY.md](THIRD_PARTY.md).

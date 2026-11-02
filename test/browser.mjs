@@ -20,6 +20,10 @@ const recordedBlock = fixture.calls.find(
   (c) => c.method === "eth_getBlockByNumber",
 ).result;
 const core = "0x74665daeca35a2303e767e76a2ff1fb6f93e119f";
+const mining = "0x3bee588fc20de788bac17d33b41da7346cb27ec4";
+const IMPLEMENTATION_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const RPC_HOST = "rpc.sepolia.ethpandaops.io";
 const root = resolve("dist");
 const mime = {
   ".html": "text/html",
@@ -61,11 +65,11 @@ const browser = await chromium.launch({ headless: true });
 const errors = [];
 let lastPage;
 const watchdog = setTimeout(() => {
-  console.error("Browser validation exceeded its 120-second limit");
+  console.error("Browser validation exceeded its 240-second limit");
   process.exitCode = 1;
   browser.close();
   server.close();
-}, 120000);
+}, 240000);
 watchdog.unref();
 function inspect(page) {
   lastPage = page;
@@ -353,8 +357,10 @@ try {
           ) {
             if (method === "wallet_switchEthereumChain" && state.unknownSepolia)
               throw Object.assign(new Error("Unknown chain"), { code: 4902 });
-            if (method === "wallet_addEthereumChain")
+            if (method === "wallet_addEthereumChain") {
               state.unknownSepolia = false;
+              state.addedRpcUrls = params[0].rpcUrls;
+            }
             state.chain = parseInt(params[0].chainId, 16);
             localStorage.setItem("__test_wallet_chain", String(state.chain));
             emit("chainChanged", params[0].chainId);
@@ -417,6 +423,8 @@ try {
   let frontier = 100n;
   let generation = 0;
   let failing = false;
+  // One of: null, "abort", { code, message } on the Core slot, or a tampered Mining slot.
+  let fault = null;
   const work = new Map();
   const position = (round) => {
     let cumulativeWork = 1000n;
@@ -435,6 +443,13 @@ try {
   const rpc = (request) => {
     const { method, params = [] } = request;
     if (method === "eth_chainId") return "0xaa36a7";
+    if (
+      fault?.tamperMining &&
+      method === "eth_getStorageAt" &&
+      params[0].toLowerCase() === mining &&
+      params[1] === IMPLEMENTATION_SLOT
+    )
+      return `0x${"00".repeat(12)}${"11".repeat(20)}`;
     if (method === "eth_getBlockByNumber")
       return blockFor(
         params[0] === "finalized"
@@ -502,32 +517,44 @@ try {
     if (!match) throw new Error(`Unrecorded chain read: ${method}`);
     return match.result;
   };
-  await connected.route(
-    "https://11155111.rpc.thirdweb.com/**",
-    async (route) => {
-      if (failing) {
-        await route.fulfill({ status: 503, body: "Test RPC unavailable" });
-        return;
-      }
-      const body = route.request().postDataJSON();
-      const respond = (request) => ({
-        jsonrpc: "2.0",
-        id: request.id,
-        result: rpc(request),
+  await connected.route(`https://${RPC_HOST}/**`, async (route) => {
+    if (failing) {
+      await route.fulfill({ status: 503, body: "Test RPC unavailable" });
+      return;
+    }
+    // The browser's view of a 429 sent without a CORS header: no response at all.
+    if (fault === "abort") {
+      await route.abort("failed");
+      return;
+    }
+    const body = route.request().postDataJSON();
+    const respond = (request) =>
+      fault?.code &&
+      request.method === "eth_getStorageAt" &&
+      request.params[0].toLowerCase() === core &&
+      request.params[1] === IMPLEMENTATION_SLOT
+        ? {
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: fault.code, message: fault.message },
+          }
+        : {
+            jsonrpc: "2.0",
+            id: request.id,
+            result: rpc(request),
+          };
+    try {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(
+          Array.isArray(body) ? body.map(respond) : respond(body),
+        ),
       });
-      try {
-        await route.fulfill({
-          contentType: "application/json",
-          body: JSON.stringify(
-            Array.isArray(body) ? body.map(respond) : respond(body),
-          ),
-        });
-      } catch (error) {
-        errors.push(error.message);
-        await route.fulfill({ status: 500, body: error.message });
-      }
-    },
-  );
+    } catch (error) {
+      errors.push(error.message);
+      await route.fulfill({ status: 500, body: error.message });
+    }
+  });
   const live = await connected.newPage();
   inspect(live);
   await live.goto(url);
@@ -562,10 +589,22 @@ try {
     live,
     (rows) => rows[0]?.checkpoint === "100" && rows[0].energy === 0,
   );
+  const readyButton = await live
+    .getByRole("button", { name: "Sign mayor order", exact: true })
+    .boundingBox();
+  assert.ok(
+    readyButton.y + readyButton.height <= 844,
+    "The signing action must stay on the first 390px screen once connected",
+  );
+  await live.getByText(/This does not send a transaction/).waitFor();
   const earlyMethods = await live.evaluate(
     () => window.__walletTest.state.methods,
   );
   assert.ok(earlyMethods.includes("wallet_addEthereumChain"));
+  assert.deepEqual(
+    await live.evaluate(() => window.__walletTest.state.addedRpcUrls),
+    [`https://${RPC_HOST}`],
+  );
   assert.equal(earlyMethods.includes("eth_signTypedData_v4"), false);
   results.push(
     "Injected EIP-6963 wallet, rejected connection, wrong network and Sepolia switch/add fallback pass",
@@ -607,6 +646,14 @@ try {
   );
   await live.reload();
   await live.getByText("Connected to Squeekchain", { exact: true }).waitFor();
+  // A wallet restored after reload must really read the chain: signing only unlocks after a
+  // verified refresh, and "Connected" must never be shown before one.
+  assert.equal(
+    await live
+      .getByRole("button", { name: "Sign mayor order", exact: true })
+      .isEnabled(),
+    true,
+  );
   assert.equal((await saveState(live))[0].completed, 1);
   assert.equal(
     await live.locator(".town-scene").getAttribute("data-event"),
@@ -631,11 +678,107 @@ try {
       .isDisabled(),
     true,
   );
+  // Diagnostics stay closed until asked for, then name the stage and the real error.
+  const panel = live.locator(".diagnostics");
+  const rowsOf = async () =>
+    Object.fromEntries(
+      await panel
+        .locator("dl > div")
+        .evaluateAll((rows) =>
+          rows.map((row) => [
+            row.querySelector("dt").textContent,
+            row.querySelector("dd").textContent,
+          ]),
+        ),
+    );
+  const stageIs = (name) =>
+    panel.locator("dd").getByText(name, { exact: true }).first().waitFor();
+  const retry = () =>
+    live.getByRole("button", { name: "Retry connection", exact: true }).click();
+  assert.equal(await panel.locator("dl").isVisible(), false);
+  assert.equal(
+    await live.getByText(/Sepolia could not be reached/).count(),
+    0,
+    "The generic message must be gone",
+  );
+  await panel.locator("summary").focus();
+  await live.keyboard.press("Enter");
+  await stageIs("network");
+  let rows = await rowsOf();
+  assert.equal(rows["Failure type"], "RPC or network failure");
+  assert.equal(rows["RPC hostname"], RPC_HOST);
+  assert.equal(rows["Error name"], "HttpRequestError");
+  assert.equal(rows["Short message"], "HTTP request failed.");
+  assert.equal(rows["HTTP status"], "503");
+  assert.match(rows["Underlying cause"], /Test RPC unavailable/);
+  const panelText = await panel.innerText();
+  for (const account of accounts)
+    assert.equal(
+      panelText.toLowerCase().includes(account.address.toLowerCase()),
+      false,
+    );
+  assert.equal(/Request body|https?:\/\//.test(panelText), false);
+  await live.getByText(/not a deployment change/).waitFor();
   failing = false;
-  await live
-    .getByRole("button", { name: "Retry connection", exact: true })
-    .click();
+  fault = "abort";
+  await retry();
+  await panel.getByText(/Failed to fetch/).waitFor();
+  rows = await rowsOf();
+  assert.equal(rows["Failed stage"], "network");
+  assert.equal(rows["Failure type"], "RPC or network failure");
+  fault = { code: -32000, message: "missing trie node" };
+  await retry();
+  await stageIs("Core proxy verification");
+  rows = await rowsOf();
+  assert.equal(rows["Failure type"], "RPC or network failure");
+  assert.equal(rows["RPC error code"], "-32000");
+  assert.match(rows["Underlying cause"], /missing trie node/);
+  fault = { tamperMining: true };
+  await retry();
+  await stageIs("Mining proxy verification");
+  rows = await rowsOf();
+  assert.equal(rows["Failure type"], "Deployment mismatch");
+  assert.equal(rows["Error name"], "DeploymentMismatchError");
+  assert.match(
+    rows["Short message"],
+    /SqueekMining: the implementation is 0x1111/,
+  );
+  await live.getByText(/does not match the official record/).waitFor();
+  assert.equal((await saveState(live))[0].checkpoint, "101");
+  assert.equal((await saveState(live))[0].energy, 0);
+  assert.equal(
+    await live
+      .getByRole("button", { name: "Sign mayor order", exact: true })
+      .isDisabled(),
+    true,
+  );
+  for (const width of [320, 390, 760]) {
+    await live.setViewportSize({ width, height: 844 });
+    assert.equal(
+      await live.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+      `Diagnostics overflow at ${width}px`,
+    );
+  }
+  await panel.scrollIntoViewIfNeeded();
+  await live.screenshot({
+    path: "test/scratch/browser-check/390-diagnostics.png",
+  });
+  await live.setViewportSize({ width: 1440, height: 1000 });
+  await panel.scrollIntoViewIfNeeded();
+  await live.screenshot({
+    path: "test/scratch/browser-check/1440-diagnostics.png",
+  });
+  await live.setViewportSize({ width: 390, height: 844 });
+  results.push(
+    "Connection diagnostics: closed by default, keyboard opens them; network, Core and Mining stages, HTTP status, RPC code and failed-fetch cause shown; a deployment mismatch reads differently from an RPC failure; no wallet data or URLs; no overflow at 320, 390 or 760",
+  );
+  fault = null;
+  await retry();
   await live.getByText("Connected to Squeekchain", { exact: true }).waitFor();
+  assert.equal(await panel.count(), 0);
   await waitForState(
     live,
     (rows) => rows[0]?.energy === 3 && rows[0].checkpoint === "102",

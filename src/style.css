@@ -634,6 +634,26 @@ h2 {
   margin-top: 12px;
   overflow-wrap: anywhere;
 }
+.diagnostics {
+  border-top-color: #e2cdbc;
+  margin-top: 4px;
+  color: var(--color-text);
+}
+.diagnostics summary {
+  min-height: 44px;
+  font-size: var(--text-small);
+}
+.diagnostics dl {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+.diagnostics dt {
+  font-weight: 700;
+}
+.diagnostics dd {
+  margin: 0;
+}
 .text-button {
   color: var(--color-accent);
   text-decoration: underline;
@@ -1193,6 +1213,20 @@ footer > span:first-child {
   }
   .order-area {
     margin-top: 11px;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Connected: keeps the signing action on the first phone screen. The disclosure stays first
+     in source order, is linked by aria-describedby, and the wallet still asks before signing. */
+  .sign-disclosure {
+    order: 1;
+    margin: 10px 0 0;
+  }
+  .order-footnote {
+    order: 2;
+  }
+  .order-area > .error-note {
+    order: 3;
   }
   .location-description {
     display: none;
