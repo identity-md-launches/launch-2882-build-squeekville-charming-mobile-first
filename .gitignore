@@ -1,0 +1,9 @@
+# Explicit submission path budget (maximum 8 MiB):
+# src/ + public/ + configuration: 1 MiB; dist/: 5 MiB;
+# package manifests + lockfile: 1 MiB; documentation + tests: 1 MiB.
+# Dependencies and temporary checks have a zero-byte submission budget at every depth.
+**/node_modules/
+**/.vite/
+**/.cache/
+test/scratch/
+*.tsbuildinfo
